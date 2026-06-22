@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VSCode
+.vscode/
+
+# Processed datasets
+data/train_processed.pkl
+data/val_processed.pkl
+
+# BLIP features
+data/train_blip_features.pt
+data/val_blip_features.pt
+
+# Dataset
+DisasterVQA/
+
+# HF cache
+hf_cache/
+
+# Generated features
+data/train_blip_features.pt
+data/val_blip_features.pt
+
+# Model checkpoints
+*.pth
+*.pt
+
+# Virtual envs
+venv/
+.venv/
+env/
