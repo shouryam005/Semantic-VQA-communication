@@ -16,13 +16,14 @@ near-duplicates across train and val, which inflates validation accuracy.
 Run:  python diagnostics/split_audit.py
 """
 
+import argparse
 import collections
 import pickle
 import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data"
+DATA = ROOT / "data"  # overridden by --data
 
 FNAME = re.compile(r"(.+?)_(real|synth)_A_elevDeg_(\d+)_azCenter_(\d+)")
 
@@ -43,6 +44,14 @@ def geometry(path):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", default="data", help="directory holding *_processed.pkl")
+    args = ap.parse_args()
+    global DATA
+    DATA = ROOT / args.data
+    print("data directory: %s" % args.data)
+    print()
+
     splits = {
         "train": load("train_processed.pkl"),
         "val": load("val_processed.pkl"),

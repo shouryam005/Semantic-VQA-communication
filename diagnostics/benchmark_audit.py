@@ -19,12 +19,13 @@ question encoder can actually exploit.
 Run:  python diagnostics/benchmark_audit.py
 """
 
+import argparse
 import collections
 import pickle
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data"
+DATA = ROOT / "data"  # overridden by --data
 
 
 def load(name):
@@ -37,7 +38,15 @@ def question_text(sample, idx2word):
 
 
 def main():
-    idx2word = load("idx2word_2.pkl")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", default="data", help="directory holding *_processed.pkl")
+    args = ap.parse_args()
+    global DATA
+    DATA = ROOT / args.data
+    print("data directory: %s" % args.data)
+    print()
+
+    idx2word = load("idx2word_2.pkl" if (DATA / "idx2word_2.pkl").exists() else "idx2word.pkl")
 
     splits = {
         "train": load("train_processed.pkl"),

@@ -34,3 +34,5 @@ data/val_blip_features.pt
 venv/
 .venv/
 env/
+# Rebuilt benchmark (regenerate with benchmark/build_benchmark.py)
+data_v2/
