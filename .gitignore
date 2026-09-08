@@ -36,3 +36,4 @@ venv/
 env/
 # Rebuilt benchmark (regenerate with benchmark/build_benchmark.py)
 data_v2/
+results/
