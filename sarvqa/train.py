@@ -144,6 +144,10 @@ def main():
                     help="CVNN only; how the complex spatial map is collapsed")
     ap.add_argument("--film", action="store_true",
                     help="condition the semantic encoder on the question")
+    ap.add_argument("--limit-train", type=int, default=None,
+                    help="subsample training QA pairs to this many; use when comparing "
+                         "benchmarks whose guard bands leave different amounts of data, "
+                         "so leakage is not confounded with training set size")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--verbose", action="store_true")
@@ -168,6 +172,10 @@ def main():
         print("global normalization scale (train only): %.6f" % scale)
     cache = ImageCache([r["filepath"] for rows in splits.values() for r in rows],
                        normalize=args.normalize, scale=scale)
+    if args.limit_train is not None and len(splits["train"]) > args.limit_train:
+        rng = random.Random(args.seed)
+        splits["train"] = rng.sample(splits["train"], args.limit_train)
+        print("subsampled train to %d QA pairs" % len(splits["train"]))
     datasets = {name: SARVQADataset(rows, cache) for name, rows in splits.items()}
     print("cached %d unique images in %.1fs  (train %d / val %d / test %d QA pairs)"
           % (len(cache), time.time() - t0,
