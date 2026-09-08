@@ -14,8 +14,24 @@ mean |x| ~= 0.033 with a 58x spread in peak amplitude across images, so the
 first convolution sees inputs two orders of magnitude below unit scale. That
 penalizes the complex path more than the real path, because CReLU zeroes the
 real and imaginary halves independently and a near-zero input leaves little
-signal on either side. Each image is scaled by its own mean modulus, which
-preserves phase exactly and equalizes amplitude across images.
+signal on either side.
+
+Two normalizations are available, and the choice is not cosmetic:
+
+  "global" (default)
+      Divide every image by one constant, the mean modulus over the training
+      images. Fixes the scale problem while preserving relative brightness
+      between images. SAR amplitude is calibrated -- it is radar cross-section,
+      a physical property of the target -- so brightness differences between a
+      tank and a truck are real signal.
+
+  "per-image"
+      Divide each image by its own mean modulus. Also fixes scale, but discards
+      absolute radar cross-section, deleting a legitimate discriminative cue.
+
+Both preserve phase exactly: dividing a complex number by a positive real
+scales its modulus and leaves its argument untouched. The constant for "global"
+is computed from the training split only, so no test statistics leak into it.
 """
 
 import pickle
@@ -39,18 +55,33 @@ def load_vocab(data_dir):
         return pickle.load(f)
 
 
+def global_scale(filepaths):
+    """Mean modulus over the given images -- pass training paths only."""
+    total, count = 0.0, 0
+    for path in dict.fromkeys(filepaths):
+        x = loadmat(path)["complex_img"]
+        total += np.abs(x).sum()
+        count += x.size
+    return float(total / count)
+
+
 class ImageCache:
     """Parses each unique .mat once and keeps the complex images in memory."""
 
-    def __init__(self, filepaths, normalize=True):
+    def __init__(self, filepaths, normalize="global", scale=None):
+        if normalize == "global" and scale is None:
+            raise ValueError("normalize='global' needs a scale from the training split")
+
         self.index = {}
         images = []
         for path in dict.fromkeys(filepaths):
             x = loadmat(path)["complex_img"].astype(np.complex64)
-            if normalize:
-                scale = np.abs(x).mean()
-                if scale > 0:
-                    x = x / scale
+            if normalize == "global":
+                x = x / scale
+            elif normalize == "per-image":
+                own = np.abs(x).mean()
+                if own > 0:
+                    x = x / own
             self.index[path] = len(images)
             images.append(x)
         self.images = torch.from_numpy(np.stack(images))
@@ -76,10 +107,12 @@ class SARVQADataset(Dataset):
         self.cache = cache
 
     @classmethod
-    def from_split(cls, data_dir, name, cache=None, normalize=True):
+    def from_split(cls, data_dir, name, cache=None, normalize="global"):
         records = load_split(data_dir, name)
         if cache is None:
-            cache = ImageCache([r["filepath"] for r in records], normalize=normalize)
+            paths = [r["filepath"] for r in records]
+            scale = global_scale(paths) if normalize == "global" else None
+            cache = ImageCache(paths, normalize=normalize, scale=scale)
         return cls(records, cache)
 
     def __len__(self):

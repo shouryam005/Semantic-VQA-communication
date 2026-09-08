@@ -175,3 +175,42 @@ class ComplexAdaptiveAvgPool2d(nn.Module):
     def forward(self, x):
         pool = lambda t: nn.functional.adaptive_avg_pool2d(t, self.output_size)
         return torch.complex(pool(x.real), pool(x.imag))
+
+
+class ZReLU(nn.Module):
+    """
+    Identity inside the first quadrant, zero elsewhere (Guberman 2016).
+
+    Unlike CReLU it never moves a value's phase -- it either keeps the number
+    exactly or discards it -- so surviving activations carry undistorted phase.
+    """
+
+    def forward(self, x):
+        keep = (x.real >= 0) & (x.imag >= 0)
+        return x * keep.to(x.dtype)
+
+
+class Cardioid(nn.Module):
+    """
+    Phase-preserving smooth activation (Virtue et al. 2017):
+
+        f(z) = 0.5 * (1 + cos(arg z)) * z
+
+    The gain depends only on phase and the phase itself passes through
+    untouched, so this is the complex analogue of ReLU that a real network
+    gets for free: it gates magnitude without rotating anything.
+    """
+
+    def forward(self, x):
+        gain = 0.5 * (1.0 + torch.cos(torch.angle(x)))
+        return x * gain.to(x.dtype)
+
+
+ACTIVATIONS = {"crelu": CReLU, "modrelu": ModReLU, "zrelu": ZReLU, "cardioid": Cardioid}
+
+
+def make_activation(name, num_features):
+    """ModReLU carries a per-channel bias; the others are parameter-free."""
+    if name == "modrelu":
+        return ModReLU(num_features)
+    return ACTIVATIONS[name]()

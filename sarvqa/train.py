@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from .data import ImageCache, SARVQADataset, load_split, load_vocab
+from .data import ImageCache, SARVQADataset, global_scale, load_split, load_vocab
 from .models import MODELS, count_parameters
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -90,6 +90,9 @@ def run_once(args, datasets, vocab, device, seed):
         vocab_size=len(vocab),
         use_channel=not args.no_channel,
         snr_db=args.snr,
+        activation=args.activation,
+        pooling=args.pooling,
+        film=args.film,
     ).to(device)
 
     criterion = nn.CrossEntropyLoss()
@@ -134,7 +137,13 @@ def main():
     ap.add_argument("--snr", type=float, default=10.0)
     ap.add_argument("--no-channel", action="store_true",
                     help="disable semantic encoder/AWGN/decoder; isolates the image path")
-    ap.add_argument("--no-normalize", action="store_true")
+    ap.add_argument("--normalize", choices=["global", "per-image", "none"], default="global")
+    ap.add_argument("--activation", choices=["crelu", "modrelu", "zrelu", "cardioid"],
+                    default="crelu", help="CVNN only")
+    ap.add_argument("--pooling", choices=["avg", "coherence", "modulus"], default="avg",
+                    help="CVNN only; how the complex spatial map is collapsed")
+    ap.add_argument("--film", action="store_true",
+                    help="condition the semantic encoder on the question")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--verbose", action="store_true")
@@ -145,14 +154,20 @@ def main():
     vocab = load_vocab(args.data)
     idx2word = {v: k for k, v in vocab.items()}
 
-    print("model=%s  data=%s  channel=%s  epochs=%d  seed=%d  repeats=%d  device=%s"
+    print("model=%s  data=%s  channel=%s  norm=%s  act=%s  pool=%s  film=%s"
           % (args.model, args.data, "off" if args.no_channel else "on@%gdB" % args.snr,
-             args.epochs, args.seed, args.repeats, device))
+             args.normalize, args.activation, args.pooling, args.film))
+    print("epochs=%d  seed=%d  repeats=%d  device=%s"
+          % (args.epochs, args.seed, args.repeats, device))
 
     t0 = time.time()
     splits = {name: load_split(args.data, name) for name in ("train", "val", "test")}
+    train_paths = [r["filepath"] for r in splits["train"]]
+    scale = global_scale(train_paths) if args.normalize == "global" else None
+    if scale is not None:
+        print("global normalization scale (train only): %.6f" % scale)
     cache = ImageCache([r["filepath"] for rows in splits.values() for r in rows],
-                       normalize=not args.no_normalize)
+                       normalize=args.normalize, scale=scale)
     datasets = {name: SARVQADataset(rows, cache) for name, rows in splits.items()}
     print("cached %d unique images in %.1fs  (train %d / val %d / test %d QA pairs)"
           % (len(cache), time.time() - t0,
@@ -178,11 +193,13 @@ def main():
     print("=" * 72)
     print("%s  |  %d parameters  |  %d epochs  |  %d run(s)"
           % (args.model, count_parameters(MODELS[args.model](
-              len(vocab), use_channel=not args.no_channel)), args.epochs, args.repeats))
+              len(vocab), use_channel=not args.no_channel, activation=args.activation,
+              pooling=args.pooling, film=args.film)), args.epochs, args.repeats))
     for key in ("accuracy", "balanced_accuracy"):
         values = np.array([100 * r[key] for r in results])
         print("  %-18s %6.2f%%  +/- %.2f   %s"
-              % (key, values.mean(), values.std(), np.round(values, 2).tolist()))
+              % (key, values.mean(), values.std(ddof=1) if len(values) > 1 else 0.0,
+                 np.round(values, 2).tolist()))
     print("  chance                50.00%   (rebuilt benchmark is 50/50 per question)")
 
     per_q = collections.defaultdict(list)

@@ -44,7 +44,7 @@ from .complex_layers import (
     ComplexConv2d,
     ComplexLinear,
     ComplexMaxPool2d,
-    ModReLU,
+    make_activation,
 )
 
 IMAGE_FEATURES = 64      # real values leaving the image path, both models
@@ -81,6 +81,49 @@ class Classifier(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+class FiLM(nn.Module):
+    """
+    Question-conditioned modulation of the image features before transmission.
+
+    Without this the transmitter compresses the image without knowing the
+    question, which makes the pipeline image compression followed by VQA rather
+    than task-oriented semantic communication. The point of semantic
+    communication is that the sender transmits what the task needs, so the
+    question has to reach the encoder.
+
+    Feature-wise linear modulation (Perez et al. 2018): the question vector
+    predicts a per-feature scale and shift,
+
+        h <- gamma(q) * h + beta(q)
+
+    which is the lightest conditioning that can gate features on or off. Both
+    models get an identical FiLM stage, so the comparison stays controlled; for
+    the complex model gamma and beta are complex, so conditioning can rotate
+    phase as well as rescale magnitude.
+    """
+
+    def __init__(self, question_features, feature_count, complex_valued=False):
+        super().__init__()
+        self.complex_valued = complex_valued
+        self.feature_count = feature_count
+        outputs = feature_count * (4 if complex_valued else 2)
+        self.project = nn.Linear(question_features, outputs)
+        # start as the identity: gamma = 1, beta = 0
+        nn.init.zeros_(self.project.weight)
+        with torch.no_grad():
+            self.project.bias.zero_()
+            self.project.bias[:feature_count] = 1.0
+
+    def forward(self, features, question):
+        params = self.project(question)
+        n = self.feature_count
+        if not self.complex_valued:
+            return params[:, :n] * features + params[:, n:]
+        gamma = torch.complex(params[:, :n], params[:, n:2 * n])
+        beta = torch.complex(params[:, 2 * n:3 * n], params[:, 3 * n:])
+        return gamma * features + beta
 
 
 class AWGNChannel(nn.Module):
@@ -166,27 +209,82 @@ class RealSemanticDecoder(nn.Module):
 # complex-valued branch
 # --------------------------------------------------------------------------
 
+class ComplexPoolingHead(nn.Module):
+    """
+    How the spatial map is collapsed before the classifier. This is where the
+    notebook architecture silently destroyed phase, so it is made explicit.
+
+    Global average pooling of complex values is the trap. Averaging numbers with
+    unrelated phases makes them cancel: measured on the last conv block, only
+    13.5% of the signal survives when a phase-preserving activation is used.
+    CReLU hides this by forcing Re >= 0 and Im >= 0, which confines every
+    activation to the first quadrant -- pooling then survives at 91%, but only
+    because phase has already been crushed into a 90 degree wedge. Either way
+    almost no phase reaches the classifier.
+
+    All three modes emit the same width (2 * channels real values) so the
+    classifier and the parameter budget are unchanged.
+
+      "avg"        spatial mean of z, split into real and imaginary parts.
+                   The notebook behaviour, kept as the baseline.
+
+      "coherence"  [mean|z|, |mean z|] per channel. The first term is energy,
+                   which survives any phase; the second is the coherent sum,
+                   which is large only when phases across the map agree. Their
+                   ratio is the standard SAR coherence estimator, so this gives
+                   the classifier a genuine phase-structure feature instead of
+                   a cancelled average.
+
+      "modulus"    [mean|z|, max|z|] per channel. Phase-free by construction.
+                   The control: if this matches the others, phase contributed
+                   nothing and the complex machinery is decoration.
+    """
+
+    def __init__(self, mode="coherence"):
+        super().__init__()
+        self.mode = mode
+
+    @property
+    def emits_complex(self):
+        return self.mode == "avg"
+
+    def forward(self, x):
+        if self.mode == "avg":
+            return torch.complex(x.real.mean((2, 3)), x.imag.mean((2, 3)))
+
+        modulus = torch.abs(x)
+        energy = modulus.mean((2, 3))
+        if self.mode == "coherence":
+            coherent = torch.abs(torch.complex(x.real.mean((2, 3)), x.imag.mean((2, 3))))
+            return torch.cat([energy, coherent], dim=1)
+        if self.mode == "modulus":
+            return torch.cat([energy, modulus.amax((2, 3))], dim=1)
+        raise ValueError("unknown pooling mode: " + self.mode)
+
+
 class ComplexImageEncoder(nn.Module):
     """
-    One complex input channel. Emits IMAGE_FEATURES/2 complex features, so the
-    real vector handed to the classifier has the same width as the RVNN's.
+    One complex input channel. Emits IMAGE_FEATURES real values (or
+    IMAGE_FEATURES/2 complex ones under "avg" pooling), so the vector handed to
+    the classifier has the same width as the RVNN's either way.
     """
 
-    def __init__(self, widths=(16, 26, 32), activation="crelu"):
+    def __init__(self, widths=(16, 26, 32), activation="crelu", pooling="avg"):
         super().__init__()
         c1, c2, c3 = widths
-        act = lambda c: CReLU() if activation == "crelu" else ModReLU(c)
+        act = lambda c: make_activation(activation, c)
 
-        self.net = nn.Sequential(
+        self.features = nn.Sequential(
             ComplexConv2d(1, c1, 3, padding=1), act(c1), ComplexMaxPool2d(2),
             ComplexConv2d(c1, c2, 3, padding=1), act(c2), ComplexMaxPool2d(2),
             ComplexConv2d(c2, c3, 3, padding=1), act(c3), ComplexMaxPool2d(2),
-            ComplexAdaptiveAvgPool2d((1, 1)),
         )
+        self.pool = ComplexPoolingHead(pooling)
         self.out_features = c3
+        self.emits_complex = self.pool.emits_complex
 
     def forward(self, x):
-        return self.net(x.unsqueeze(1)).flatten(1)
+        return self.pool(self.features(x.unsqueeze(1)))
 
 
 class ComplexSemanticEncoder(nn.Module):
@@ -219,12 +317,13 @@ class ComplexSemanticDecoder(nn.Module):
 
 class RVNNVQA(nn.Module):
     def __init__(self, vocab_size, use_channel=True, snr_db=10.0,
-                 widths=(16, 32, 64), noise_at_eval=True):
+                 widths=(16, 32, 64), noise_at_eval=True, film=False, **_):
         super().__init__()
         self.image_encoder = RealImageEncoder(widths)
         self.question_encoder = QuestionEncoder(vocab_size)
         self.classifier = Classifier()
         self.use_channel = use_channel
+        self.film = FiLM(QUESTION_FEATURES, IMAGE_FEATURES) if film else None
         if use_channel:
             self.semantic_encoder = RealSemanticEncoder(self.image_encoder.out_features)
             self.channel = AWGNChannel(snr_db, noise_at_eval)
@@ -232,31 +331,58 @@ class RVNNVQA(nn.Module):
 
     def forward(self, images, questions):
         features = self.image_encoder(images)
+        question = self.question_encoder(questions)
+        if self.film is not None:
+            features = self.film(features, question)
         if self.use_channel:
             features = self.semantic_decoder(self.channel(self.semantic_encoder(features)))
-        return self.classifier(torch.cat([features, self.question_encoder(questions)], dim=1))
+        return self.classifier(torch.cat([features, question], dim=1))
 
 
 class CVNNVQA(nn.Module):
+    """
+    Complex image path. `pooling` decides whether the features leaving the
+    encoder are still complex ("avg") or already real ("coherence",
+    "modulus"); the semantic encoder matches, so the transmitted width stays
+    CHANNEL_WIDTH real values in every configuration.
+    """
+
     def __init__(self, vocab_size, use_channel=True, snr_db=10.0,
-                 widths=(16, 26, 32), activation="crelu", noise_at_eval=True):
+                 widths=(16, 26, 32), activation="crelu", pooling="avg",
+                 noise_at_eval=True, film=False, **_):
         super().__init__()
-        self.image_encoder = ComplexImageEncoder(widths, activation)
+        self.image_encoder = ComplexImageEncoder(widths, activation, pooling)
         self.question_encoder = QuestionEncoder(vocab_size)
         self.classifier = Classifier()
         self.use_channel = use_channel
+        self.complex_path = self.image_encoder.emits_complex
+
+        if film:
+            count = IMAGE_FEATURES // 2 if self.complex_path else IMAGE_FEATURES
+            self.film = FiLM(QUESTION_FEATURES, count, complex_valued=self.complex_path)
+        else:
+            self.film = None
+
         if use_channel:
-            self.semantic_encoder = ComplexSemanticEncoder(self.image_encoder.out_features)
             self.channel = AWGNChannel(snr_db, noise_at_eval)
-            self.semantic_decoder = ComplexSemanticDecoder(out_features=IMAGE_FEATURES // 2)
+            if self.complex_path:
+                self.semantic_encoder = ComplexSemanticEncoder(self.image_encoder.out_features)
+                self.semantic_decoder = ComplexSemanticDecoder(out_features=IMAGE_FEATURES // 2)
+            else:
+                self.semantic_encoder = RealSemanticEncoder(IMAGE_FEATURES)
+                self.semantic_decoder = RealSemanticDecoder(out_features=IMAGE_FEATURES)
 
     def forward(self, images, questions):
         features = self.image_encoder(images)
+        question = self.question_encoder(questions)
+        if self.film is not None:
+            features = self.film(features, question)
         if self.use_channel:
             features = self.semantic_decoder(self.channel(self.semantic_encoder(features)))
-        # concatenation, not modulus: both components reach the classifier
-        features = torch.cat([features.real, features.imag], dim=1)
-        return self.classifier(torch.cat([features, self.question_encoder(questions)], dim=1))
+        if self.complex_path:
+            # concatenation, not modulus: both components reach the classifier
+            features = torch.cat([features.real, features.imag], dim=1)
+        return self.classifier(torch.cat([features, question], dim=1))
 
 
 class QuestionOnlyVQA(nn.Module):
@@ -267,7 +393,7 @@ class QuestionOnlyVQA(nn.Module):
     On the rebuilt benchmark it should sit at chance.
     """
 
-    def __init__(self, vocab_size, **_):
+    def __init__(self, vocab_size, **_kwargs):
         super().__init__()
         self.question_encoder = QuestionEncoder(vocab_size)
         self.classifier = Classifier(in_features=QUESTION_FEATURES)
