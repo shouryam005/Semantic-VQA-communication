@@ -181,6 +181,40 @@ class RealImageEncoder(nn.Module):
         return self.net(x).flatten(1)
 
 
+class MagnitudeImageEncoder(nn.Module):
+    """
+    Real encoder fed |x| only. Phase never enters the network at any point.
+
+    This is the control for the question the whole project rests on: does SAR
+    phase carry usable information here at all? RealImageEncoder receives Re and
+    Im as two channels, so phase is present in the input even though the
+    arithmetic is real. This one receives a single magnitude channel, so phase
+    is destroyed before the first convolution.
+
+    If this ties RealImageEncoder, phase contributes nothing on SAMPLE and no
+    complex architecture could have helped -- which is what the uniform phase
+    distribution measured in diagnostics/data_audit.py predicts.
+
+    The first layer holds 144 fewer parameters than the two-channel version
+    (160 vs 304, 0.6% of the encoder), which is unavoidable: there is no way to
+    give a magnitude image two input channels without duplicating it.
+    """
+
+    def __init__(self, widths=(16, 32, 64)):
+        super().__init__()
+        c1, c2, c3 = widths
+        self.net = nn.Sequential(
+            nn.Conv2d(1, c1, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(c1, c2, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(c2, c3, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.AdaptiveAvgPool2d(1),
+        )
+        self.out_features = c3
+
+    def forward(self, x):
+        return self.net(torch.abs(x).unsqueeze(1)).flatten(1)
+
+
 class RealSemanticEncoder(nn.Module):
     def __init__(self, in_features=IMAGE_FEATURES, out_features=CHANNEL_WIDTH):
         super().__init__()
@@ -385,6 +419,15 @@ class CVNNVQA(nn.Module):
         return self.classifier(torch.cat([features, question], dim=1))
 
 
+class MagnitudeVQA(RVNNVQA):
+    """RVNNVQA with the magnitude-only encoder. Everything else is identical."""
+
+    def __init__(self, vocab_size, use_channel=True, snr_db=10.0,
+                 widths=(16, 32, 64), noise_at_eval=True, film=False, **_):
+        super().__init__(vocab_size, use_channel, snr_db, widths, noise_at_eval, film)
+        self.image_encoder = MagnitudeImageEncoder(widths)
+
+
 class QuestionOnlyVQA(nn.Module):
     """
     Control model. Identical question encoder and classifier, no image at all.
@@ -402,7 +445,8 @@ class QuestionOnlyVQA(nn.Module):
         return self.classifier(self.question_encoder(questions))
 
 
-MODELS = {"rvnn": RVNNVQA, "cvnn": CVNNVQA, "question-only": QuestionOnlyVQA}
+MODELS = {"rvnn": RVNNVQA, "cvnn": CVNNVQA, "magnitude": MagnitudeVQA,
+          "question-only": QuestionOnlyVQA}
 
 
 def count_parameters(model):
