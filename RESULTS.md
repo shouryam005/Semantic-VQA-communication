@@ -45,6 +45,30 @@ alternative pooling modes sit below plain average pooling. Within the CVNN
 the variants cluster at 80–82%; the choice of activation and pooling matters
 far less than whether phase enters at all.
 
+## Dynamic-range compression (negative result)
+
+Log scaling compresses peak-to-mean spread from 1206x to 19x. It damages every
+model, and destabilises the real-valued ones badly:
+
+| model | global norm | log norm | seeds collapsed to chance |
+|---|---|---|---|
+| magnitude | 88.87 +/- 1.01 | 70.89 +/- 18.52 | 4 / 10 |
+| rvnn | 83.97 +/- 2.10 | 60.26 +/- 13.98 | 6 / 10 |
+| cvnn | 82.13 +/- 2.31 | 77.66 +/- 5.50 | 0 / 8 (run stopped early) |
+
+Excluding collapses, log-magnitude still reaches only 84.82 +/- 5.98 against
+88.87 +/- 1.01.
+
+Interpretation: for point targets the bright specular returns are the
+discriminative signal, so compressing them destroys the structure that
+distinguishes one vehicle from another. The wide dynamic range is not a
+nuisance to normalize away -- it is where the information lives. This is why
+"Convert to dB" is listed as optional in the standard SAR L1 pipeline; it suits
+distributed targets and visual interpretation, not point-target recognition.
+
+The complex model is the least affected and the only one that never collapsed,
+which is unexplained.
+
 ## Superseded numbers
 
 The notebooks reported RVNN ~89% vs CVNN ~69%. Both are artifacts:
