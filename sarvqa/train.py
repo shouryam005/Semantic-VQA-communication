@@ -79,6 +79,30 @@ def evaluate(model, loader, device, idx2word=None):
     }
 
 
+SNR_SWEEP = [-5.0, 0.0, 5.0, 10.0, 15.0, 20.0]
+
+
+def sweep_snr(model, loader, device, points=SNR_SWEEP):
+    """
+    Evaluate one already-trained model across test SNRs.
+
+    Training at a single SNR and testing across a range is nearly free -- it is
+    an evaluation pass, not a retrain -- and mismatched train/test SNR is a
+    standard robustness test. A single operating point cannot establish
+    robustness: at high SNR every architecture works, so differences only show
+    where noise dominates the transmitted vector.
+    """
+    if not getattr(model, "use_channel", False):
+        return {}
+    original = model.channel.snr_db
+    curve = {}
+    for snr in points:
+        model.channel.snr_db = snr
+        curve[snr] = evaluate(model, loader, device)["accuracy"]
+    model.channel.snr_db = original
+    return curve
+
+
 def run_once(args, datasets, vocab, device, seed):
     set_seed(seed)
 
@@ -192,11 +216,15 @@ def main():
         final = evaluate(model, val_loader, device, idx2word)
         final["history"] = history
         final["seed"] = seed
+        final["snr_curve"] = sweep_snr(model, val_loader, device)
         results.append(final)
         print("    val acc %.2f%%  balanced %.2f%%  recall(no)=%.3f recall(yes)=%.3f  "
               "predicted-yes %.3f"
               % (100 * final["accuracy"], 100 * final["balanced_accuracy"],
                  final["recall_no"], final["recall_yes"], final["predicted_yes_rate"]))
+        if final["snr_curve"]:
+            print("    SNR sweep: " + "  ".join(
+                "%+gdB=%.1f%%" % (k, 100 * v) for k, v in sorted(final["snr_curve"].items())))
 
     print()
     print("=" * 72)
@@ -210,6 +238,15 @@ def main():
               % (key, values.mean(), values.std(ddof=1) if len(values) > 1 else 0.0,
                  np.round(values, 2).tolist()))
     print("  chance                50.00%   (rebuilt benchmark is 50/50 per question)")
+
+    curves = [r["snr_curve"] for r in results if r.get("snr_curve")]
+    if curves:
+        print("")
+        print("  SNR robustness curve (mean over runs, trained at %g dB)" % args.snr)
+        for snr in sorted(curves[0]):
+            values = np.array([100 * c[snr] for c in curves])
+            print("    %+6.1f dB   %6.2f%%  +/- %.2f" % (snr, values.mean(), values.std(ddof=1)
+                                                        if len(values) > 1 else 0.0))
 
     per_q = collections.defaultdict(list)
     for r in results:
