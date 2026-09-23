@@ -137,7 +137,8 @@ def main():
     ap.add_argument("--snr", type=float, default=10.0)
     ap.add_argument("--no-channel", action="store_true",
                     help="disable semantic encoder/AWGN/decoder; isolates the image path")
-    ap.add_argument("--normalize", choices=["global", "per-image", "none"], default="global")
+    ap.add_argument("--normalize", choices=["global", "per-image", "log", "db", "none"],
+                    default="global")
     ap.add_argument("--activation", choices=["crelu", "modrelu", "zrelu", "cardioid"],
                     default="crelu", help="CVNN only")
     ap.add_argument("--pooling", choices=["avg", "coherence", "modulus"], default="avg",
@@ -167,7 +168,7 @@ def main():
     t0 = time.time()
     splits = {name: load_split(args.data, name) for name in ("train", "val", "test")}
     train_paths = [r["filepath"] for r in splits["train"]]
-    scale = global_scale(train_paths) if args.normalize == "global" else None
+    scale = global_scale(train_paths) if args.normalize in ("global", "log", "db") else None
     if scale is not None:
         print("global normalization scale (train only): %.6f" % scale)
     cache = ImageCache([r["filepath"] for rows in splits.values() for r in rows],
