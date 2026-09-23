@@ -117,6 +117,7 @@ def run_once(args, datasets, vocab, device, seed):
         activation=args.activation,
         pooling=args.pooling,
         film=args.film,
+        late_fusion=not args.no_late_fusion,
     ).to(device)
 
     criterion = nn.CrossEntropyLoss()
@@ -169,6 +170,12 @@ def main():
                     help="CVNN only; how the complex spatial map is collapsed")
     ap.add_argument("--film", action="store_true",
                     help="condition the semantic encoder on the question")
+    ap.add_argument("--no-late-fusion", action="store_true",
+                    help="drop the question from the classifier, so the question reaches "
+                         "the model ONLY through FiLM. This is the standard FiLM "
+                         "formulation (Perez et al.), where conditioning replaces late "
+                         "fusion rather than supplementing it. Meaningless without --film: "
+                         "the model would then never see the question at all.")
     ap.add_argument("--limit-train", type=int, default=None,
                     help="subsample training QA pairs to this many; use when comparing "
                          "benchmarks whose guard bands leave different amounts of data, "
@@ -231,7 +238,8 @@ def main():
     print("%s  |  %d parameters  |  %d epochs  |  %d run(s)"
           % (args.model, count_parameters(MODELS[args.model](
               len(vocab), use_channel=not args.no_channel, activation=args.activation,
-              pooling=args.pooling, film=args.film)), args.epochs, args.repeats))
+              pooling=args.pooling, film=args.film,
+              late_fusion=not args.no_late_fusion)), args.epochs, args.repeats))
     for key in ("accuracy", "balanced_accuracy"):
         values = np.array([100 * r[key] for r in results])
         print("  %-18s %6.2f%%  +/- %.2f   %s"

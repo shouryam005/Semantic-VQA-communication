@@ -351,11 +351,14 @@ class ComplexSemanticDecoder(nn.Module):
 
 class RVNNVQA(nn.Module):
     def __init__(self, vocab_size, use_channel=True, snr_db=10.0,
-                 widths=(16, 32, 64), noise_at_eval=True, film=False, **_):
+                 widths=(16, 32, 64), noise_at_eval=True, film=False,
+                 late_fusion=True, **_):
         super().__init__()
         self.image_encoder = RealImageEncoder(widths)
         self.question_encoder = QuestionEncoder(vocab_size)
-        self.classifier = Classifier()
+        self.late_fusion = late_fusion
+        self.classifier = Classifier(IMAGE_FEATURES + QUESTION_FEATURES if late_fusion
+                                     else IMAGE_FEATURES)
         self.use_channel = use_channel
         self.film = FiLM(QUESTION_FEATURES, IMAGE_FEATURES) if film else None
         if use_channel:
@@ -370,6 +373,8 @@ class RVNNVQA(nn.Module):
             features = self.film(features, question)
         if self.use_channel:
             features = self.semantic_decoder(self.channel(self.semantic_encoder(features)))
+        if not self.late_fusion:
+            return self.classifier(features)
         return self.classifier(torch.cat([features, question], dim=1))
 
 
@@ -383,11 +388,13 @@ class CVNNVQA(nn.Module):
 
     def __init__(self, vocab_size, use_channel=True, snr_db=10.0,
                  widths=(16, 26, 32), activation="crelu", pooling="avg",
-                 noise_at_eval=True, film=False, **_):
+                 noise_at_eval=True, film=False, late_fusion=True, **_):
         super().__init__()
         self.image_encoder = ComplexImageEncoder(widths, activation, pooling)
         self.question_encoder = QuestionEncoder(vocab_size)
-        self.classifier = Classifier()
+        self.late_fusion = late_fusion
+        self.classifier = Classifier(IMAGE_FEATURES + QUESTION_FEATURES if late_fusion
+                                     else IMAGE_FEATURES)
         self.use_channel = use_channel
         self.complex_path = self.image_encoder.emits_complex
 
@@ -416,6 +423,8 @@ class CVNNVQA(nn.Module):
         if self.complex_path:
             # concatenation, not modulus: both components reach the classifier
             features = torch.cat([features.real, features.imag], dim=1)
+        if not self.late_fusion:
+            return self.classifier(features)
         return self.classifier(torch.cat([features, question], dim=1))
 
 
@@ -423,8 +432,10 @@ class MagnitudeVQA(RVNNVQA):
     """RVNNVQA with the magnitude-only encoder. Everything else is identical."""
 
     def __init__(self, vocab_size, use_channel=True, snr_db=10.0,
-                 widths=(16, 32, 64), noise_at_eval=True, film=False, **_):
-        super().__init__(vocab_size, use_channel, snr_db, widths, noise_at_eval, film)
+                 widths=(16, 32, 64), noise_at_eval=True, film=False,
+                 late_fusion=True, **_):
+        super().__init__(vocab_size, use_channel, snr_db, widths, noise_at_eval, film,
+                         late_fusion)
         self.image_encoder = MagnitudeImageEncoder(widths)
 
 
